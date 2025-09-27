@@ -7,7 +7,12 @@ local data_dir = vim.fn.stdpath("data") -- usually "~/.local/share/nvim" on Linu
 local sessions_dir = data_dir .. "/tab-sessions"
 vim.fn.mkdir(sessions_dir, "p") -- "p" = create parents if missing
 
-local current_session_state = nil
+local current_session_state = {
+  buffers = {},
+  tabs = {},
+  current_tab_id = nil,
+  current_win_id = nil,
+}
 local tab_map = {}
 local tab_map_inverted = {}
 local win_map = {}
@@ -155,6 +160,17 @@ function M.persist_session(session_state)
   end
 end
 
+function M.rehydrate_session()
+  local filename = sessions_dir .. "/anonymous.json"
+  local file = io.open(filename, "r")
+  if not file then
+    return nil
+  end
+  local contents = file:read("*a")
+  file:close()
+  return vim.fn.json_decode(contents)
+end
+
 function M.tab_info()
   M.snapshot()
   return { session_name = "Anonymous", tab_index = 1 }
@@ -187,8 +203,11 @@ function M.session_create(session_name, persistent)
 end
 
 local function restore_buffers(session_state)
-  for b in session_state.buffers do
-    if not current_session_state.buffers[b.buf_id] then
+  logger.info("Restoring buffers from session state: " .. vim.inspect(session_state))
+  for _, b in pairs(session_state.buffers) do
+    logger.info("Found session buffer: " .. vim.inspect(b))
+    if not current_session_state.buffers[b.buf_id] and b.name ~= "" then
+      logger.info("Restoring buffer: " .. b.name)
       -- Create buffer to acquire buf_nr
       local buf_nr = vim.fn.bufadd(b.name)
 
@@ -229,9 +248,8 @@ local function restore_tab_layout(node)
 end
 
 function M.session_restore()
-  vim.cmd("tabnew") -- create a fresh tab
-  restore_buffers()
-  -- restore_layout(tab) -- recurse layout
+  local session_state = M.rehydrate_session()
+  restore_buffers(session_state)
 end
 
 M.setup()
