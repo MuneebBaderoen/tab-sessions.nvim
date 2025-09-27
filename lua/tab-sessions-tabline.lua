@@ -29,13 +29,13 @@ end
 function M.tabline()
   local s = ""
   local current_tab = vim.api.nvim_get_current_tabpage()
+  local tab_info = sessions.tab_info()
 
   for i, tab in ipairs(vim.api.nvim_list_tabpages()) do
     -- get the window of this tab
     local win = vim.api.nvim_tabpage_get_win(tab)
     local bufnr = vim.api.nvim_win_get_buf(win)
     local title = get_buffer_title(bufnr)
-    local tab_info = sessions.tab_info(tab)
 
     -- highlight current tab
     if tab == current_tab then
