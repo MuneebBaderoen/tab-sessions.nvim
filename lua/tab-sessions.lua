@@ -3,6 +3,10 @@ local M = {}
 local logger = require("tab-sessions-logger")
 logger.init()
 
+local data_dir = vim.fn.stdpath("data") -- usually "~/.local/share/nvim" on Linux/macOS
+local sessions_dir = data_dir .. "/tab-sessions"
+vim.fn.mkdir(sessions_dir, "p") -- "p" = create parents if missing
+
 local current_session_state = nil
 local tab_map = {}
 local tab_map_inverted = {}
@@ -23,10 +27,14 @@ end
 --   return rev
 -- end
 
+local function set_mapped_id(map, inverted_map, nr, id)
+  map[nr] = id
+  inverted_map[id] = nr
+end
+
 local function get_mapped_id(map, inverted_map, nr)
   if not map[nr] then
-    map[nr] = uuidgen()
-    inverted_map[map[nr]] = nr
+    set_mapped_id(map, inverted_map, nr, uuidgen())
   end
 
   return map[nr]
@@ -67,30 +75,45 @@ local function get_buf_info(buf_nr)
   }
 end
 
-local function get_win_info(win_nr)
-  return {
-    win_id = get_win_id(win_nr),
-    buf_id = get_buf_id(vim.api.nvim_win_get_buf(win_nr)),
-    cursor = vim.api.nvim_win_get_cursor(win_nr),
-  }
+local function get_buf_state(buf_id)
+  return current_session_state.buffers[buf_id]
+end
+
+-- Recursive helper to capture layout
+local function capture_layout(layout)
+  local kind, content = layout[1], layout[2]
+
+  if kind == "leaf" then
+    local win_nr = content
+    local buf_nr = vim.api.nvim_win_get_buf(win_nr)
+    local cursor = vim.api.nvim_win_get_cursor(win_nr)
+    return {
+      kind = kind,
+      buf_id = get_buf_id(buf_nr),
+      cursor = cursor,
+    }
+  else
+    local children = {}
+    for _, child in ipairs(content) do
+      table.insert(children, capture_layout(child))
+    end
+    return {
+      kind = kind, -- "row" or "col"
+      children = children,
+    }
+  end
 end
 
 local function get_tab_info(tab_nr)
-  local tab_info = {
+  return {
     tab_id = get_tab_id(tab_nr),
-    windows = {},
+    layout = capture_layout(vim.fn.winlayout(tab_nr)),
   }
-
-  for _, win_nr in ipairs(vim.api.nvim_tabpage_list_wins(tab_nr)) do
-    table.insert(tab_info.windows, get_win_info(win_nr))
-  end
-
-  return tab_info
 end
 
 -- Initialize session state
 function M.setup()
-  M.session_create("Anonymous", true)
+  M.session_create("anonymous", true)
 end
 
 -- Capture current editor state
@@ -104,12 +127,12 @@ function M.snapshot()
 
   -- Buffers
   for _, buf_nr in ipairs(vim.api.nvim_list_bufs()) do
-    table.insert(state.buffers, get_buf_info(buf_nr))
+    state.buffers[get_buf_id(buf_nr)] = get_buf_info(buf_nr)
   end
 
   -- Tabs and Windows
   for _, tab_nr in ipairs(vim.api.nvim_list_tabpages()) do
-    table.insert(state.tabs, get_tab_info(tab_nr))
+    state.tabs[get_tab_id(tab_nr)] = get_tab_info(tab_nr)
   end
 
   -- Current window and buffer
@@ -118,9 +141,18 @@ function M.snapshot()
 
   current_session_state = state
 
-  logger.info(vim.fn.json_encode(current_session_state))
+  M.persist_session(vim.fn.json_encode(current_session_state))
 
   return state
+end
+
+function M.persist_session(session_state)
+  local filename = sessions_dir .. "/anonymous.json"
+  local file = io.open(filename, "w") -- overwrites
+  if file then
+    file:write(session_state) -- replaces previous content
+    file:close()
+  end
 end
 
 function M.tab_info()
@@ -154,7 +186,53 @@ function M.session_create(session_name, persistent)
   logger.info("Session created: " .. session_name)
 end
 
-function M.session_restore() end
+local function restore_buffers(session_state)
+  for b in session_state.buffers do
+    if not current_session_state.buffers[b.buf_id] then
+      -- Create buffer to acquire buf_nr
+      local buf_nr = vim.fn.bufadd(b.name)
+
+      -- Store buf_id and buf_nr in the buf_map
+      set_mapped_id(buf_map, buf_map_inverted, buf_nr, b.buf_id)
+
+      -- Load buffer contents
+      vim.fn.bufload(buf_nr)
+
+      -- Make buffer visible in buffer list
+      vim.api.nvim_set_option_value("buflisted", true, { buf = buf_nr })
+    end
+  end
+end
+
+local function restore_tab_layout(node)
+  if node.kind == "leaf" then
+    local target_buf = get_buf_state(node.buf_id)
+    local buf_nr = get_buf_nr(node.buf_id)
+
+    vim.api.nvim_win_set_buf(0, target_buf.buf_nr)
+    if node.cursor and #node.cursor == 2 then
+      pcall(vim.api.nvim_win_set_cursor, 0, node.cursor)
+    end
+    return
+  end
+
+  -- kind is "row" or "col"
+  local split_cmd = (node.kind == "row") and "vsplit" or "split"
+
+  for i, child in ipairs(node.children or {}) do
+    if i > 1 then
+      vim.cmd(split_cmd)
+      vim.cmd("wincmd l") -- move to the new window
+    end
+    restore_layout(child)
+  end
+end
+
+function M.session_restore()
+  vim.cmd("tabnew") -- create a fresh tab
+  restore_buffers()
+  -- restore_layout(tab) -- recurse layout
+end
 
 M.setup()
 
