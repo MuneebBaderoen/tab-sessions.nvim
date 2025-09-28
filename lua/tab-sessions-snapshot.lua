@@ -1,34 +1,100 @@
 local logger = require("tab-sessions-logger")
+local util = require("tab-sessions-util")
 
 local data_dir = vim.fn.stdpath("data") -- usually "~/.local/share/nvim" on Linux/macOS
 local sessions_dir = data_dir .. "/tab-sessions"
 vim.fn.mkdir(sessions_dir, "p") -- "p" = create parents if missing
 
-local function uuidgen()
-  return string.lower(vim.fn.system("uuidgen"):gsub("%s+", ""))
+---@class TabSnapshot
+---@field tab_id string
+---@field position number
+---@field layout TabLayoutNode
+local TabSnapshot = {}
+
+---@class WindowSnapshot
+---@field win_id string
+---@field buf_id string
+---@field cursor table<number>
+local WindowSnapshot = {}
+WindowSnapshot.__index = WindowSnapshot
+
+function WindowSnapshot:new(win_id, buf_id, cursor)
+  local obj = setmetatable({}, self)
+  obj.win_id = win_id
+  obj.buf_id = buf_id
+  obj.cursor = cursor
+  return obj
 end
+
+---@class BufferSnapshot
+---@field buf_id string
+---@field name string
+local BufferSnapshot = {}
+BufferSnapshot.__index = BufferSnapshot
+
+function BufferSnapshot:new(buf_id, name)
+  local obj = setmetatable({}, self)
+  obj.buf_id = buf_id
+  obj.name = name
+  return obj
+end
+
+---@class TabLayoutContainer
+---@field kind "row" | "col"
+---@field children table<WindowSnapshot>
+local TabLayoutContainer = {}
+TabLayoutContainer.__index = TabLayoutContainer
+
+function TabLayoutContainer:new(kind)
+  local obj = setmetatable({}, self)
+  obj.kind = kind
+  obj.children = {}
+  return obj
+end
+
+function TabLayoutContainer:add_child(node)
+  table.insert(self.children, node)
+end
+
+---@class TabLayoutWindow
+---@field kind "leaf"
+---@field win_id string
+---@field children table<WindowSnapshot>
+local TabLayoutWindow = {}
+TabLayoutWindow.__index = TabLayoutWindow
+
+function TabLayoutWindow:new(win_id)
+  local obj = setmetatable({}, self)
+  obj.kind = "leaf"
+  obj.win_id = win_id
+  return obj
+end
+
+---@alias TabLayoutNode TabLayoutContainer | TabLayoutWindow
 
 ---@class Snapshot
 ---@field version number
 ---@field session_id string
 ---@field persistent boolean
 ---@field name string
----@field workdir string|nil
----@field tabs table<any>
----@field buffers table<any>
+---@field workdir string
+---@field tabs table<string, TabSnapshot>
+---@field buffers table<string, BufferSnapshot>
+---@field windows table<string, WindowSnapshot>
 ---@field current_tab_id string|nil
 ---@field current_win_id string|nil
 local Snapshot = {}
 Snapshot.__index = Snapshot
 
-function Snapshot:new(name, persistent)
+function Snapshot:new(name, persistent, workdir)
   local obj = setmetatable({}, self)
   obj.version = 1
-  obj.session_id = uuidgen()
+  obj.session_id = util.uuidgen()
   obj.persistent = persistent
   obj.name = name
-  obj.workdir = nil
+  obj.workdir = workdir
   obj.buffers = {}
+  obj.windows = {}
   obj.tabs = {}
   obj.current_tab_id = nil
   obj.current_win_id = nil
@@ -36,67 +102,59 @@ function Snapshot:new(name, persistent)
 end
 
 -- Recursive helper to capture layout
-local function capture_layout(buf_id_map, layout)
+---@param buf_id_map IdMap
+---@param win_id_map IdMap
+---@param layout any
+---@return TabLayoutNode
+function Snapshot:capture_layout(buf_id_map, win_id_map, layout)
+  logger.debug("Capturing layout. WinIdMap: " .. vim.inspect(win_id_map))
   local kind, content = layout[1], layout[2]
-  logger.info("Capturing layout: " .. vim.inspect(layout))
-  logger.info("Kind: " .. vim.inspect(kind))
-  logger.info("Content: " .. vim.inspect(content))
-
-  if not layout then
-    logger.warn("Nil layout - skipping...")
-  end
-  if not kind then
-    logger.warn("Nil kind - skipping...")
-  end
-  if not content then
-    logger.warn("Nil content - skipping...")
-  end
-
   if kind == "leaf" then
     local win_nr = content
     local buf_nr = vim.api.nvim_win_get_buf(win_nr)
+
+    -- Updated window info
+    local win_id = win_id_map:get_id(win_nr)
+    local buf_id = buf_id_map:get_id(buf_nr)
     local cursor = vim.api.nvim_win_get_cursor(win_nr)
-    return {
-      kind = kind,
-      buf_id = buf_id_map:get_id(buf_nr),
-      cursor = cursor,
-    }
+    self.windows[win_id_map:get_id(win_nr)] = WindowSnapshot:new(win_id, buf_id, cursor)
+
+    -- Return tab layout reference to the window
+    return TabLayoutWindow:new(win_id)
   else
-    local children = {}
+    -- kind is either 'row' or 'col'
+    local container = TabLayoutContainer:new(kind)
     for _, child in ipairs(content) do
-      logger.debug("Recursing content: " .. vim.inspect(content))
-      logger.debug("Recursing child: " .. vim.inspect(child))
-      table.insert(children, capture_layout(buf_id_map, child))
+      container:add_child(self:capture_layout(buf_id_map, win_id_map, child))
     end
-    return {
-      kind = kind, -- "row" or "col"
-      children = children,
-    }
+    return container
   end
 end
 
+-- Reconstruct the snapshot from editor state, and write it to disk
+---@param buf_id_map IdMap
+---@param tab_id_map IdMap
+---@param win_id_map IdMap
 function Snapshot:refresh(buf_id_map, tab_id_map, win_id_map)
   -- Buffers
   for _, buf_nr in ipairs(vim.api.nvim_list_bufs()) do
     local name = vim.api.nvim_buf_get_name(buf_nr)
+    -- NOTE: Ignore buffers here that we don't want to restore. These buffers
+    -- may still be represented in the tab window layout, so this needs to be
+    -- handled when restoring sessions.
     if name ~= "" then
-      self.buffers[buf_id_map:get_id(buf_nr)] = {
-        buf_id = buf_id_map:get_id(buf_nr),
-        name = name,
-      }
+      local buf_id = buf_id_map:get_id(buf_nr)
+      self.buffers[buf_id_map:get_id(buf_nr)] = BufferSnapshot(buf_id, name)
     end
   end
 
   -- Tabs and Windows
   for tab_idx, tab_nr in ipairs(vim.api.nvim_list_tabpages()) do
-    local layout = vim.fn.winlayout(tab_idx)
-    logger.debug(
-      "Capturing tab layout. TabNr: " .. tab_nr .. ", TabIdx" .. tab_idx .. ", Layout:" .. vim.inspect(layout)
-    )
     self.tabs[tab_id_map:get_id(tab_nr)] = {
       tab_id = tab_id_map:get_id(tab_nr),
       position = tab_idx,
-      layout = capture_layout(buf_id_map, layout),
+      -- NOTE: winlayout expects the tab index, not the tab handle.
+      layout = self:capture_layout(buf_id_map, win_id_map, vim.fn.winlayout(tab_idx)),
     }
   end
 
@@ -108,6 +166,7 @@ function Snapshot:refresh(buf_id_map, tab_id_map, win_id_map)
   self:write()
 end
 
+--- Write snapshot to disk
 function Snapshot:write()
   local filename = sessions_dir .. "/" .. self.name .. ".json"
   local file = io.open(filename, "w") -- overwrites
@@ -121,8 +180,8 @@ local M = {}
 M.Snapshot = Snapshot
 
 ---@return Snapshot
-function M.create(name, persistent)
-  return Snapshot:new(name, persistent)
+function M.create(name, persistent, workdir)
+  return Snapshot:new(name, persistent, workdir)
 end
 
 ---@return Snapshot|nil
@@ -141,7 +200,9 @@ function M.read(session_name)
   snapshot.version = content.version
   snapshot.session_id = content.session_id
   snapshot.name = content.name
+  snapshot.workdir = content.workdir
   snapshot.buffers = content.buffers
+  snapshot.windows = content.windows
   snapshot.tabs = content.tabs
   snapshot.current_tab_id = content.current_tab_id
   snapshot.current_win_id = content.current_win_id
