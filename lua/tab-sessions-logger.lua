@@ -1,6 +1,7 @@
 local M = {}
 
 local current_file = nil
+local log_level = 4
 
 function M.create_log_file()
   -- create timestamped log file
@@ -32,16 +33,34 @@ function M.write(msg)
   end
 end
 
+function M.trace(msg)
+  if log_level >= 5 then
+    M.write("[TRACE] " .. msg)
+  end
+end
+
+function M.debug(msg)
+  if log_level >= 4 then
+    M.write("[DEBUG] " .. msg)
+  end
+end
+
 function M.info(msg)
-  M.write("[INFO] " .. msg)
+  if log_level >= 3 then
+    M.write("[INFO] " .. msg)
+  end
 end
 
 function M.warn(msg)
-  M.write("[WARN] " .. msg)
+  if log_level >= 2 then
+    M.write("[WARN] " .. msg)
+  end
 end
 
 function M.error(msg)
-  M.write("[ERROR] " .. msg)
+  if log_level >= 1 then
+    M.write("[ERROR] " .. msg)
+  end
 end
 
 function M.close()
