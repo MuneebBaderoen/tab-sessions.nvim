@@ -15,6 +15,8 @@ function IdMap:new(entity_type)
   return obj
 end
 
+---@param entity_nr integer
+---@param entity_id string
 function IdMap:set_mapping(entity_nr, entity_id)
   self.map[entity_nr] = entity_id
   self.inverted_map[entity_id] = entity_nr

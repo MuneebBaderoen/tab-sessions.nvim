@@ -1,5 +1,6 @@
 local M = {}
 
+local util = require("tab-sessions-util")
 local logger = require("tab-sessions-logger")
 logger.init()
 
@@ -50,17 +51,6 @@ function M.session_create(session_name)
   current_session_snapshot:refresh(buf_id_map, tab_id_map, win_id_map)
 end
 
----Return a list of keys from a table
----@param t table
----@return table
-local function keys(t)
-  local result = {}
-  for k, _ in pairs(t) do
-    result[#result + 1] = k
-  end
-  return result
-end
-
 function M.prune_buffers()
   local cwd = current_session_snapshot.workdir
   if not cwd then
@@ -87,12 +77,8 @@ function M.prune_buffers()
 end
 
 local function restore_buffers(session_snapshot)
-  logger.debug("Restoring buffers from snapshot: " .. vim.inspect(session_snapshot))
   for _, b in pairs(session_snapshot.buffers) do
-    logger.debug("Found buffer: " .. vim.inspect(b))
-    logger.debug("Current buffers: " .. vim.inspect(keys(buf_id_map.inverted_map)))
     if not buf_id_map:get_nr(b.buf_id) then
-      logger.debug("Restoring buffer: " .. b.name)
       -- Create buffer to acquire buf_nr
       local buf_nr = vim.fn.bufadd(b.name)
 
@@ -109,55 +95,47 @@ local function restore_buffers(session_snapshot)
 end
 
 ---@param session_snapshot Snapshot
----@param node any
+---@param node TabLayoutNode
 local function restore_tab_layout(session_snapshot, node)
-  logger.debug("Restoring tab layout node: " .. vim.inspect(node))
-  logger.debug("buf_id_map: " .. vim.inspect(buf_id_map))
-  logger.debug("session_snapshot windows: " .. vim.inspect(session_snapshot.windows))
-
   if node.kind == "leaf" then
-    local target_window = session_snapshot.windows[node.win_id]
-    local target_buf = session_snapshot.buffers[target_window.buf_id]
-
-    logger.debug("Restoring (win, buf): " .. vim.inspect(target_window) .. ", " .. vim.inspect(target_buf))
-    local buf_nr = buf_id_map:get_nr(target_window.buf_id)
+    local window = session_snapshot.windows[node.win_id]
+    local buf_nr = buf_id_map:get_nr(window.buf_id)
     if not buf_nr then
-      logger.error("target_buf not found for node: " .. vim.inspect(node))
       return
     end
 
-    logger.debug("Restoring buf_nr: " .. tostring(buf_nr) .. " for target_buf: " .. vim.inspect(target_buf))
+    -- Assign the buffer to the window
     vim.api.nvim_win_set_buf(0, buf_nr)
+
     -- Safe attempt to set cursor position. There's no guarantee that the
     -- contents of the file still allow the cursor to be placed at the same
     -- location.
-    pcall(vim.api.nvim_win_set_cursor, 0, target_window.cursor)
+    pcall(vim.api.nvim_win_set_cursor, 0, window.cursor)
     return
-  end
-
-  -- kind is "row" or "col"
-  local split_cmd = (node.kind == "row") and "vsplit" or "split"
-
-  for i, child in ipairs(node.children or {}) do
-    if i > 1 then
-      vim.cmd(split_cmd)
-      vim.cmd("wincmd l") -- move to the new window
+  else
+    for i, child in ipairs(node.children or {}) do
+      if i > 1 then
+        -- `kind` is "row" or "col"
+        -- Perform the appropriate split based on container `kind`
+        vim.cmd((node.kind == "row") and "vsplit" or "split")
+      end
+      restore_tab_layout(session_snapshot, child)
     end
-    restore_tab_layout(session_snapshot, child)
   end
 end
 
 function M.session_restore()
   local loaded_snapshot = snapshot.read("anonymous")
   if not loaded_snapshot then
+    vim.notify("Session snapshot could not be loaded", vim.log.levels.ERROR)
     return
   end
 
   logger.info("Restoring session from snapshot" .. vim.inspect(loaded_snapshot))
   restore_buffers(loaded_snapshot)
 
-  for tab_id, tab in pairs(loaded_snapshot.tabs) do
-    logger.info("Restoring tab: " .. tab_id .. " with layout: " .. vim.inspect(tab.layout))
+  local tabs = util.sorted(util.values(loaded_snapshot.tabs), util.sort_selector("position"))
+  for tab_id, tab in ipairs(tabs) do
     vim.cmd("tabnew")
     restore_tab_layout(loaded_snapshot, tab.layout)
   end

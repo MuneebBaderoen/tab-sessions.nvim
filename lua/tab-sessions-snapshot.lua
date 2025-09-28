@@ -122,7 +122,7 @@ function Snapshot:capture_layout(buf_id_map, win_id_map, layout)
     -- Return tab layout reference to the window
     return TabLayoutWindow:new(win_id)
   else
-    -- kind is either 'row' or 'col'
+    -- `kind` is either 'row' or 'col'
     local container = TabLayoutContainer:new(kind)
     for _, child in ipairs(content) do
       container:add_child(self:capture_layout(buf_id_map, win_id_map, child))
@@ -139,12 +139,12 @@ function Snapshot:refresh(buf_id_map, tab_id_map, win_id_map)
   -- Buffers
   for _, buf_nr in ipairs(vim.api.nvim_list_bufs()) do
     local name = vim.api.nvim_buf_get_name(buf_nr)
-    -- NOTE: Ignore buffers here that we don't want to restore. These buffers
+    -- TODO: Ignore buffers here that we don't want to restore. These buffers
     -- may still be represented in the tab window layout, so this needs to be
     -- handled when restoring sessions.
     if name ~= "" then
       local buf_id = buf_id_map:get_id(buf_nr)
-      self.buffers[buf_id_map:get_id(buf_nr)] = BufferSnapshot(buf_id, name)
+      self.buffers[buf_id_map:get_id(buf_nr)] = BufferSnapshot:new(buf_id, name)
     end
   end
 
@@ -170,25 +170,31 @@ end
 function Snapshot:write()
   local filename = sessions_dir .. "/" .. self.name .. ".json"
   local file = io.open(filename, "w") -- overwrites
-  if file then
-    file:write(vim.fn.json_encode(self)) -- replaces previous content
-    file:close()
+  if not file then
+    vim.notify("Unable to open file at path: " .. filename, vim.log.levels.ERROR)
+    return nil
   end
+
+  file:write(vim.fn.json_encode(self)) -- replaces previous content
+  file:close()
 end
 
 local M = {}
 M.Snapshot = Snapshot
 
+--- Create a new instance
 ---@return Snapshot
 function M.create(name, persistent, workdir)
   return Snapshot:new(name, persistent, workdir)
 end
 
+--- Load the snapshot from disk by name. Returns nil if there is no such file
 ---@return Snapshot|nil
 function M.read(session_name)
   local filename = sessions_dir .. "/" .. session_name .. ".json"
   local file = io.open(filename, "r")
   if not file then
+    vim.notify("File not found at path: " .. filename, vim.log.levels.ERROR)
     return nil
   end
   local contents = file:read("*a")
