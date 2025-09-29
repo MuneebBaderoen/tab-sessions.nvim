@@ -26,6 +26,15 @@ function M.keys(t)
   return vim.iter(t):map(map_keys):totable()
 end
 
+function M.find(list, predicate)
+  for i, v in ipairs(list) do
+    if predicate(v) then
+      return i
+    end
+  end
+  return nil -- not found
+end
+
 -- In-place sort, to avoid extra declarations
 function M.sorted(list, selector)
   table.sort(list, selector)

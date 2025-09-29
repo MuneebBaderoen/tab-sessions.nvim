@@ -117,6 +117,18 @@ function Snapshot:new(name, persistent, workdir)
   return obj
 end
 
+function Snapshot:clear_tabs()
+  self.tabs = {}
+end
+
+function Snapshot:clear_windows()
+  self.windows = {}
+end
+
+function Snapshot:clear_buffers()
+  self.buffers = {}
+end
+
 function Snapshot:new_tab(tab_id, position, layout_node)
   self.tabs[tab_id] = TabSnapshot:new(tab_id, position, layout_node)
 end
@@ -131,6 +143,10 @@ end
 
 --- Write snapshot to disk
 function Snapshot:write()
+  if not self.persistent then
+    return
+  end
+
   local filename = sessions_dir .. "/" .. self.name .. ".json"
   local file = io.open(filename, "w") -- overwrites
   if not file then
@@ -167,11 +183,9 @@ function M.read(session_name)
   local content = vim.fn.json_decode(contents)
 
   -- Reconstruct state from disk
-  local snapshot = Snapshot:new()
+  local snapshot = Snapshot:new(content.name, true, content.workdir)
   snapshot.version = content.version
   snapshot.session_id = content.session_id
-  snapshot.name = content.name
-  snapshot.workdir = content.workdir
   snapshot.buffers = content.buffers
   snapshot.windows = content.windows
   snapshot.tabs = content.tabs

@@ -12,21 +12,41 @@ local session_manager = manager.create()
 -- Initialize session state
 function M.setup()
   logger.init()
+  session_manager:setup()
+
+  -- Create a named augroup (or clear it if it exists)
+  local group_name = "tab-sessions-autocmd-handlers"
+  vim.api.nvim_create_augroup(group_name, { clear = true })
+
+  -- Create the autocmds in that group
+  vim.api.nvim_create_autocmd("VimLeavePre", {
+    group = group_name,
+    callback = function()
+      logger.info("Neovim is exiting — storing sessions...")
+      session_manager:write_all()
+    end,
+  })
 end
 
-function M.tab_info()
-  return { session_name = "Anonymous", tab_index = 1 }
+function M.tab_info(tab_nr)
+  return session_manager:get_tab_info(tab_nr)
 end
 
-function M.tab_next() end
+function M.tab_next()
+  session_manager:tab_next()
+end
 
 function M.tab_move_next() end
 
-function M.tab_prev() end
+function M.tab_prev()
+  session_manager:tab_prev()
+end
 
 function M.tab_move_prev() end
 
-function M.tab_create() end
+function M.tab_create()
+  session_manager:create_tab()
+end
 
 function M.tab_close() end
 
@@ -41,7 +61,8 @@ function M.session_move_prev() end
 function M.session_close() end
 
 function M.session_create(session_name)
-  session_manager:create("anonymous")
+  local persistent = true
+  session_manager:create(session_name, persistent)
 end
 
 function M.prune_buffers()
@@ -69,8 +90,8 @@ function M.prune_buffers()
   -- end
 end
 
-function M.session_restore()
-  session_manager:restore("anonymous")
+function M.session_restore(session_name)
+  session_manager:restore(session_name)
 end
 
 return M
