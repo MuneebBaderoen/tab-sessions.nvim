@@ -22,30 +22,44 @@ function M.setup()
   vim.api.nvim_create_autocmd("VimLeavePre", {
     group = group_name,
     callback = function()
-      logger.info("Neovim is exiting — storing sessions...")
       session_manager:write_all()
     end,
   })
+
+  vim.api.nvim_create_autocmd("TabClosed", {
+    group = group_name,
+    callback = function()
+      session_manager:on_tab_close()
+    end,
+  })
+end
+
+function M.current_session()
+  return session_manager:current_session()
 end
 
 function M.tab_info(tab_nr)
   return session_manager:get_tab_info(tab_nr)
 end
 
+function M.window_close()
+  session_manager:window_close()
+end
+
 function M.tab_next()
-  session_manager:tab_next()
+  session_manager:tab_select(1)
 end
 
 function M.tab_move_next() end
 
 function M.tab_prev()
-  session_manager:tab_prev()
+  session_manager:tab_select(-1)
 end
 
 function M.tab_move_prev() end
 
 function M.tab_create()
-  session_manager:create_tab()
+  session_manager:tab_create()
 end
 
 function M.tab_close() end
@@ -65,29 +79,12 @@ function M.session_create(session_name)
   session_manager:create(session_name, persistent)
 end
 
-function M.prune_buffers()
-  local cwd = current_session_snapshot.workdir
-  if not cwd then
-    return
-  end
+function M.prune_files()
+  session_manager:prune("files")
+end
 
-  local buffers_to_remove = {}
-
-  -- Identify buffers outside the working directory
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    local name = vim.api.nvim_buf_get_name(buf)
-    local in_cwd = name ~= "" and vim.fn.fnamemodify(name, ":p"):find(cwd, 1, true)
-    if not in_cwd then
-      table.insert(buffers_to_remove, buf)
-    end
-  end
-
-  logger.debug("Prune buffers: " .. vim.inspect(buffers_to_remove))
-
-  -- Wipe out only the small set of irrelevant buffers
-  -- for _, buf in ipairs(buffers_to_remove) do
-  --   pcall(vim.api.nvim_buf_delete, buf, { force = true })
-  -- end
+function M.prune_cwd_files()
+  session_manager:prune("cwd_files")
 end
 
 function M.session_restore(session_name)

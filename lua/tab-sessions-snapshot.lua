@@ -133,6 +133,10 @@ function Snapshot:new_tab(tab_id, position, layout_node)
   self.tabs[tab_id] = TabSnapshot:new(tab_id, position, layout_node)
 end
 
+function Snapshot:remove_tab(tab_id)
+  self.tabs[tab_id] = nil
+end
+
 function Snapshot:new_window(win_id, buf_id, cursor)
   self.windows[win_id] = WindowSnapshot:new(win_id, buf_id, cursor)
 end

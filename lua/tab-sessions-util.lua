@@ -26,7 +26,7 @@ function M.keys(t)
   return vim.iter(t):map(map_keys):totable()
 end
 
-function M.find(list, predicate)
+function M.index_of(list, predicate)
   for i, v in ipairs(list) do
     if predicate(v) then
       return i

@@ -1,11 +1,29 @@
 local util = require("tab-sessions-util")
 local id_map = require("tab-sessions-id-map")
 local logger = require("tab-sessions-logger")
-local snapshot = require("tab-sessions-snapshot")
-local TabLayoutContainer = snapshot.TabLayoutContainer
-local TabLayoutWindow = snapshot.TabLayoutWindow
+local snapshot_factory = require("tab-sessions-snapshot")
+local TabLayoutContainer = snapshot_factory.TabLayoutContainer
+local TabLayoutWindow = snapshot_factory.TabLayoutWindow
 
 local anonymous_session_name = "anonymous"
+
+---@class TabInfo
+---@field session_name string
+---@field session_active boolean
+---@field tab_position integer
+local TabInfo = {}
+
+---@param session_name string
+---@param session_active boolean
+---@param tab_position integer
+---@return TabInfo
+function TabInfo:new(session_name, session_active, tab_position)
+  local obj = setmetatable({}, self)
+  obj.session_name = session_name
+  obj.session_active = session_active
+  obj.tab_position = tab_position
+  return obj
+end
 
 ---@class SessionManager
 ---@field initialized boolean
@@ -34,9 +52,10 @@ end
 
 function SessionManager:setup()
   -- Create an anonymous session by default
-  -- This session is not persisted, it just ensures that we're working in the
+  -- Thises session is not persisted, it just ensures that we're working in the
   -- context of a session at all times
-  self:create(self.current_session_name, false, false)
+  local persistent = false
+  self:create(self.current_session_name, persistent)
   -- Assign all existing tabs to the anonymous session
   for _, tab_nr in ipairs(vim.api.nvim_list_tabpages()) do
     local tab_id = self.tab_id_map:get_id(tab_nr)
@@ -47,47 +66,37 @@ function SessionManager:setup()
 end
 
 --- Create a new session by name
+---@param session_name string
+---@param persistent boolean
+---@return Snapshot
 function SessionManager:create(session_name, persistent)
   if not self.session_map[session_name] then
-    logger.info("Creating session: " .. session_name)
-    local session = snapshot.create(session_name, persistent, vim.fn.getcwd())
-    self.session_map[session_name] = session
+    self.session_map[session_name] = snapshot_factory.create(session_name, persistent, vim.fn.getcwd())
     if session_name ~= self.current_session_name then
       self.current_session_name = session_name
-      self:create_tab()
+      self:tab_create()
     end
-    logger.info("Session created: " .. session_name)
   end
 
-  logger.info("Refreshing session: " .. session_name)
-  self:refresh(self.session_map[session_name])
+  local session = self.session_map[session_name]
+  self:refresh(session)
+  return session
 end
 
-function SessionManager:activate_tab(tab_nr)
-  return
-  -- local tab_id = self.tab_id_map:get_id(tab_nr)
-  -- logger.info("Activating tab: " .. tab_nr .. " with tab_id: " .. tab_id)
-  -- logger.info("Tab session map" .. vim.inspect(self.tab_session_map))
-  -- local session_name = self.tab_session_map[tab_id]
-  -- logger.info("Activating tab: " .. tab_nr .. " with tab_id: " .. tab_id .. " in session: " .. session_name)
-  -- self.current_session_name = session_name
-end
-
+--- Get tab info to render tabline
+---@param tab_nr integer
+---@return TabInfo
 function SessionManager:get_tab_info(tab_nr)
   local tab_id = self.tab_id_map:get_id(tab_nr)
   local session_name = self.tab_session_map[tab_id]
-  -- logger.info("Manager: " .. vim.inspect(self))
-  -- logger.info(
-  --   "Tab: " .. tab_nr .. " Session name: " .. session_name .. ", Session map: " .. vim.inspect(self.tab_session_map)
-  -- )
-  -- logger.info("Session snapshot: " .. vim.inspect(self.session_map[session_name]))
-  -- logger.info("Session tabs: " .. vim.inspect(self.session_map[session_name].tabs))
+  local session_active = self.current_session_name == session_name
   local tab_position = self.session_map[session_name].tabs[tab_id].position
-  return { session_name = session_name, tab_position = tab_position }
+  return TabInfo:new(session_name, session_active, tab_position)
 end
 
+--- Write all snapshots to disk. Usually only required on exit
 function SessionManager:write_all()
-  for session_name, session_snapshot in pairs(self.session_map) do
+  for _, session_snapshot in pairs(self.session_map) do
     self:refresh(session_snapshot)
     session_snapshot:write()
   end
@@ -129,6 +138,9 @@ function SessionManager:refresh(session_snapshot)
   session_snapshot:clear_windows()
   session_snapshot:clear_buffers()
 
+  -- Clear out buffers we don't want to capture. Keep only real files
+  self:prune("files")
+
   -- Buffers
   for _, buf_nr in ipairs(vim.api.nvim_list_bufs()) do
     local name = vim.api.nvim_buf_get_name(buf_nr)
@@ -155,13 +167,6 @@ function SessionManager:refresh(session_snapshot)
       session_snapshot:new_tab(tab_id, tab_idx, layout)
     end
   end
-
-  -- Current window and buffer
-  -- TODO: Ensure that we only update the current window and tab when the
-  -- current session's tabs are active If a different session is active, this
-  -- session's snapshot should not be updated
-  session_snapshot.current_tab_id = self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
-  session_snapshot.current_win_id = self.win_id_map:get_id(vim.api.nvim_get_current_win())
 end
 
 --- Restore buffers defined in the session into the running Neovim instance
@@ -192,15 +197,13 @@ function SessionManager:restore_tab_layout(session_snapshot, node)
     local window = session_snapshot.windows[node.win_id]
     local buf_nr = self.buf_id_map:get_nr(window.buf_id)
     if not buf_nr then
+      vim.notify("Buffer not found for buf_id: " .. window.buf_id, vim.log.levels.WARN)
       return
     end
 
-    -- Assign the buffer to the window
+    -- Assign the buffer to the window, and safe attempt to set the cursor position.
+    -- The file may have changed since the cursor position was persisted.
     vim.api.nvim_win_set_buf(0, buf_nr)
-
-    -- Safe attempt to set cursor position. There's no guarantee that the
-    -- contents of the file still allow the cursor to be placed at the same
-    -- location.
     pcall(vim.api.nvim_win_set_cursor, 0, window.cursor)
     return
   else
@@ -217,34 +220,105 @@ end
 
 ---@param session_name string
 function SessionManager:restore(session_name)
-  local loaded_snapshot = snapshot.read(session_name)
-  if not loaded_snapshot then
-    vim.notify("Session snapshot could not be loaded", vim.log.levels.ERROR)
+  local snapshot = snapshot_factory.read(session_name)
+  if not snapshot then
+    vim.notify("Session snapshot could not be loaded for session: " .. session_name, vim.log.levels.ERROR)
     return
   end
 
-  if self.session_map[loaded_snapshot.name] then
-    vim.notify("Session already loaded: " .. loaded_snapshot.name, vim.log.levels.WARN)
+  if self.session_map[snapshot.name] then
+    vim.notify("Session already loaded: " .. snapshot.name, vim.log.levels.WARN)
     return
   end
 
-  self.session_map[loaded_snapshot.name] = loaded_snapshot
-  self:restore_buffers(loaded_snapshot)
+  self.session_map[snapshot.name] = snapshot
+  self.current_session_name = snapshot.name
+  self:restore_buffers(snapshot)
 
-  local tabs = util.sorted(util.values(loaded_snapshot.tabs), util.sort_selector("position"))
-  for _, tab in ipairs(tabs) do
-    -- Create new tab, and assign it to the session being restored
+  local tabs = util.sorted(util.values(snapshot.tabs), util.sort_selector("position"))
+  if #tabs == 0 then
+    -- If the stored session does not cont
     vim.cmd("tabnew")
-    self.tab_id_map:set_mapping(vim.api.nvim_get_current_tabpage(), tab.tab_id)
-    self.tab_session_map[tab.tab_id] = loaded_snapshot.name
-    self:restore_tab_layout(loaded_snapshot, tab.layout)
+    local tab_id = self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
+    self.tab_session_map[tab_id] = snapshot.name
+    -- HACK: We don't have a convenient way to re-apply the current layout into
+    -- the snapshot, other than to perform a capture of the manual
+    -- modifications.
+    self:restore_tab_layout(snapshot, self:capture_layout(snapshot, vim.fn.winlayout()))
+  else
+    for _, tab in ipairs(tabs) do
+      -- Create new tab, and assign it to the session being restored
+      vim.cmd("tabnew")
+      self.tab_id_map:set_mapping(vim.api.nvim_get_current_tabpage(), tab.tab_id)
+      self.tab_session_map[tab.tab_id] = snapshot.name
+      self:restore_tab_layout(snapshot, tab.layout)
+    end
+  end
+
+  -- Prune buffers keeping only the buffers attached to real files
+  -- Perform the prune after restoring, to ensure that the window layout
+  -- is preserved as expected
+  self:prune("files")
+end
+
+local function list_real_wins(tab_nr)
+  local wins = vim.api.nvim_tabpage_list_wins(tab_nr)
+  local real_wins = {}
+
+  for _, win in ipairs(wins) do
+    local config = vim.api.nvim_win_get_config(win)
+    -- skip floating windows
+    if not config.relative or config.relative == "" then
+      table.insert(real_wins, win)
+    end
+  end
+
+  return real_wins
+end
+
+function SessionManager:window_close()
+  local wins = list_real_wins(0)
+  local session_tabs = util.values(self:current_session().tabs)
+  if #wins == 1 and #session_tabs == 1 then
+    vim.notify("Keeping session open - last window", vim.log.levels.INFO)
+  else
+    vim.api.nvim_win_close(0, false)
   end
 end
 
-function SessionManager:create_tab()
+function SessionManager:on_window_close()
+  --
+end
+
+function SessionManager:tab_create()
   vim.cmd("tabnew")
-  self.tab_session_map[self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())] = self.current_session_name
+  local tab_id = self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
+  self.tab_session_map[tab_id] = self.current_session_name
   self:refresh(self:current_session())
+end
+
+-- Check if a tab handle is still valid
+local function is_tab_valid(tabs, tab)
+  for _, t in ipairs(tabs) do
+    if t == tab then
+      return true
+    end
+  end
+  return false
+end
+
+function SessionManager:on_tab_close()
+  local tab_handles = vim.api.nvim_list_tabpages()
+  local tab_nrs = util.keys(self.tab_id_map.map)
+  for _, tab_nr in ipairs(self.tab_id_map:numbers()) do
+    if not is_tab_valid(tab_handles, tab_nr) then
+      local tab_id = self.tab_id_map:get_id(tab_nr)
+      local session_name = self.tab_session_map[tab_id]
+      self.session_map[session_name]:remove_tab(tab_id)
+      self.tab_id_map:delete_mapping(tab_id)
+      self.tab_session_map[tab_id] = nil
+    end
+  end
 end
 
 function SessionManager:tab_select(offset)
@@ -260,8 +334,53 @@ function SessionManager:current_session()
   return self.session_map[self.current_session_name]
 end
 
-function SessionManager:prune()
-  --
+local function is_in_cwd(path, cwd)
+  if path == "" then
+    return false
+  end
+  local abs = vim.fn.fnamemodify(path, ":p") -- absolute path
+  return abs:sub(1, #cwd) == cwd
+end
+
+-- Helper function to safely remove a buffer and close any corresponding
+-- windows bound to the buffer
+local function remove_buffer(bufnr)
+  if vim.api.nvim_buf_is_loaded(bufnr) then
+    for _, win in ipairs(vim.fn.win_findbuf(bufnr)) do
+      vim.api.nvim_win_close(win, true)
+    end
+  end
+  vim.api.nvim_buf_delete(bufnr, { force = true })
+end
+
+--- Prune buffers down to those attached to real files. Prune operation can be
+--- extended to only keep files in the cwd of the current session.
+---@param mode "files" | "cwd_files"
+function SessionManager:prune(mode)
+  local cwd = self:current_session().workdir
+
+  for buf_id, _ in pairs(self:current_session().buffers) do
+    local buf_nr = self.buf_id_map:get_nr(buf_id)
+    if vim.api.nvim_buf_is_valid(buf_nr) and vim.api.nvim_buf_is_loaded(buf_nr) then
+      local name = vim.api.nvim_buf_get_name(buf_nr)
+      local buftype = vim.bo[buf_nr].buftype
+
+      local is_real = (name ~= "" and vim.fn.filereadable(name) == 1)
+      local in_cwd = is_real and is_in_cwd(name, cwd)
+
+      if mode == "files" then
+        if not is_real then
+          remove_buffer(buf_nr)
+        end
+      elseif mode == "cwd_files" then
+        if not (is_real and in_cwd) then
+          remove_buffer(buf_nr)
+        end
+      else
+        error("Unknown mode: " .. tostring(mode))
+      end
+    end
+  end
 end
 
 local M = {}
