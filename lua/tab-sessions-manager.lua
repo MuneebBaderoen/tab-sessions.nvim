@@ -62,7 +62,7 @@ function SessionManager:setup()
     self.tab_session_map[tab_id] = self.current_session_name
   end
   -- Refresh the session to capture the current tab layout
-  self:refresh(self:current_session())
+  self:refresh_session(self:current_session())
 end
 
 --- Create a new session by name
@@ -79,7 +79,7 @@ function SessionManager:create(session_name, persistent)
   end
 
   local session = self.session_map[session_name]
-  self:refresh(session)
+  self:refresh_session(session)
   return session
 end
 
@@ -97,7 +97,7 @@ end
 --- Write all snapshots to disk. Usually only required on exit
 function SessionManager:write_all()
   for _, session_snapshot in pairs(self.session_map) do
-    self:refresh(session_snapshot)
+    self:refresh_session(session_snapshot)
     session_snapshot:write()
   end
 end
@@ -132,7 +132,7 @@ end
 
 -- Reconstruct the snapshot from editor state, and write it to disk
 ---@param session_snapshot Snapshot
-function SessionManager:refresh(session_snapshot)
+function SessionManager:refresh_session(session_snapshot)
   -- Reset current state
   session_snapshot:clear_tabs()
   session_snapshot:clear_windows()
@@ -144,9 +144,6 @@ function SessionManager:refresh(session_snapshot)
   -- Buffers
   for _, buf_nr in ipairs(vim.api.nvim_list_bufs()) do
     local name = vim.api.nvim_buf_get_name(buf_nr)
-    -- TODO: Ignore buffers here that we don't want to restore. These buffers
-    -- may still be represented in the tab window layout, so this needs to be
-    -- handled when restoring sessions.
     if name ~= "" then
       local buf_id = self.buf_id_map:get_id(buf_nr)
       session_snapshot:new_buffer(buf_id, name)
@@ -235,7 +232,7 @@ function SessionManager:restore(session_name)
   self.current_session_name = snapshot.name
   self:restore_buffers(snapshot)
 
-  local tabs = util.sorted(util.values(snapshot.tabs), util.sort_selector("position"))
+  local tabs = snapshot.tab_list
   if #tabs == 0 then
     -- If the stored session does not cont
     vim.cmd("tabnew")
@@ -286,15 +283,11 @@ function SessionManager:window_close()
   end
 end
 
-function SessionManager:on_window_close()
-  --
-end
-
 function SessionManager:tab_create()
   vim.cmd("tabnew")
   local tab_id = self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
   self.tab_session_map[tab_id] = self.current_session_name
-  self:refresh(self:current_session())
+  self:refresh_session(self:current_session())
 end
 
 -- Check if a tab handle is still valid
@@ -309,20 +302,19 @@ end
 
 function SessionManager:on_tab_close()
   local tab_handles = vim.api.nvim_list_tabpages()
-  local tab_nrs = util.keys(self.tab_id_map.map)
   for _, tab_nr in ipairs(self.tab_id_map:numbers()) do
     if not is_tab_valid(tab_handles, tab_nr) then
       local tab_id = self.tab_id_map:get_id(tab_nr)
       local session_name = self.tab_session_map[tab_id]
       self.session_map[session_name]:remove_tab(tab_id)
-      self.tab_id_map:delete_mapping(tab_id)
+      self.tab_id_map:remove_mapping(tab_id)
       self.tab_session_map[tab_id] = nil
     end
   end
 end
 
 function SessionManager:tab_select(offset)
-  local tabs = util.sorted(util.values(self:current_session().tabs), util.sort_selector("position"))
+  local tabs = self:current_session().tab_list
   local current_tab_idx = util.index_of(tabs, function(item)
     return item.tab_id == self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
   end)
@@ -330,6 +322,7 @@ function SessionManager:tab_select(offset)
   vim.api.nvim_set_current_tabpage(self.tab_id_map:get_nr(tabs[target_tab_idx].tab_id))
 end
 
+---@return Snapshot
 function SessionManager:current_session()
   return self.session_map[self.current_session_name]
 end
@@ -363,8 +356,6 @@ function SessionManager:prune(mode)
     local buf_nr = self.buf_id_map:get_nr(buf_id)
     if vim.api.nvim_buf_is_valid(buf_nr) and vim.api.nvim_buf_is_loaded(buf_nr) then
       local name = vim.api.nvim_buf_get_name(buf_nr)
-      local buftype = vim.bo[buf_nr].buftype
-
       local is_real = (name ~= "" and vim.fn.filereadable(name) == 1)
       local in_cwd = is_real and is_in_cwd(name, cwd)
 

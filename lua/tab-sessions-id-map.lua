@@ -34,7 +34,7 @@ function IdMap:set_mapping(entity_nr, entity_id)
 end
 
 ---@param entity_id string
-function IdMap:delete_mapping(entity_id)
+function IdMap:remove_mapping(entity_id)
   local entity_nr = self.inverted_map[entity_id]
   self.map[entity_nr] = nil
   self.inverted_map[entity_id] = nil
@@ -45,7 +45,7 @@ end
 function IdMap:get_id(entity_nr)
   local key = tostring(entity_nr)
   if not self.map[key] then
-    self:set_mapping(key, util.uuidgen())
+    self:set_mapping(entity_nr, util.uuidgen())
   end
 
   return self.map[key]

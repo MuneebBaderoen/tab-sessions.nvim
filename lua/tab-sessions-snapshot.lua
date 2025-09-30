@@ -91,10 +91,9 @@ end
 ---@field name string
 ---@field workdir string
 ---@field tabs table<string, TabSnapshot>
+---@field tab_list table<TabSnapshot>
 ---@field buffers table<string, BufferSnapshot>
 ---@field windows table<string, WindowSnapshot>
----@field current_tab_id string|nil
----@field current_win_id string|nil
 local Snapshot = {}
 Snapshot.__index = Snapshot
 
@@ -112,13 +111,13 @@ function Snapshot:new(name, persistent, workdir)
   obj.buffers = {}
   obj.windows = {}
   obj.tabs = {}
-  obj.current_tab_id = nil
-  obj.current_win_id = nil
+  obj.tab_list = {}
   return obj
 end
 
 function Snapshot:clear_tabs()
   self.tabs = {}
+  self:rebuild_tab_list()
 end
 
 function Snapshot:clear_windows()
@@ -131,10 +130,12 @@ end
 
 function Snapshot:new_tab(tab_id, position, layout_node)
   self.tabs[tab_id] = TabSnapshot:new(tab_id, position, layout_node)
+  self:rebuild_tab_list()
 end
 
 function Snapshot:remove_tab(tab_id)
   self.tabs[tab_id] = nil
+  self:rebuild_tab_list()
 end
 
 function Snapshot:new_window(win_id, buf_id, cursor)
@@ -143,6 +144,14 @@ end
 
 function Snapshot:new_buffer(buf_id, name)
   self.buffers[buf_id] = BufferSnapshot:new(buf_id, name)
+end
+
+function Snapshot:rebuild_tab_list()
+  local tabs = util.sorted(util.values(self.tabs), util.sort_selector("position"))
+  self.tab_list = tabs
+  for idx, tab in ipairs(self.tab_list) do
+    tab.position = idx
+  end
 end
 
 --- Write snapshot to disk
@@ -193,8 +202,7 @@ function M.read(session_name)
   snapshot.buffers = content.buffers
   snapshot.windows = content.windows
   snapshot.tabs = content.tabs
-  snapshot.current_tab_id = content.current_tab_id
-  snapshot.current_win_id = content.current_win_id
+  snapshot:rebuild_tab_list()
   return snapshot
 end
 
