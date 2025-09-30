@@ -11,6 +11,8 @@ local session_manager = manager.create()
 
 -- Initialize session state
 function M.setup()
+  -- Ensure the session snapshot directory exists
+  vim.fn.mkdir(util.session_data_dir(), "p") -- "p" = create parents if missing
   logger.init()
   session_manager:setup()
 
@@ -38,8 +40,13 @@ function M.current_session()
   return session_manager:current_session()
 end
 
-function M.tab_info(tab_nr)
-  return session_manager:get_tab_info(tab_nr)
+function M.write_all()
+  session_manager:write_all()
+end
+
+---@return table<TabInfo>
+function M.tab_info()
+  return session_manager:get_tab_info()
 end
 
 function M.window_close()
@@ -87,8 +94,12 @@ function M.prune_cwd_files()
   session_manager:prune("cwd_files")
 end
 
+function M.session_activate(session_name)
+  session_manager:activate_session(session_name)
+end
+
 function M.session_restore(session_name)
-  session_manager:restore(session_name)
+  session_manager:restore_session(session_name)
 end
 
 return M

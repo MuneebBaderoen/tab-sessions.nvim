@@ -1,10 +1,6 @@
 local logger = require("tab-sessions-logger")
 local util = require("tab-sessions-util")
 
-local data_dir = vim.fn.stdpath("data") -- usually "~/.local/share/nvim" on Linux/macOS
-local sessions_dir = data_dir .. "/tab-sessions"
-vim.fn.mkdir(sessions_dir, "p") -- "p" = create parents if missing
-
 ---@class TabSnapshot
 ---@field tab_id string
 ---@field position number
@@ -94,6 +90,8 @@ end
 ---@field tab_list table<TabSnapshot>
 ---@field buffers table<string, BufferSnapshot>
 ---@field windows table<string, WindowSnapshot>
+---@field current_tab_id string
+---@field current_win_id string
 local Snapshot = {}
 Snapshot.__index = Snapshot
 
@@ -112,6 +110,8 @@ function Snapshot:new(name, persistent, workdir)
   obj.windows = {}
   obj.tabs = {}
   obj.tab_list = {}
+  obj.current_tab_id = nil
+  obj.current_win_id = nil
   return obj
 end
 
@@ -160,7 +160,7 @@ function Snapshot:write()
     return
   end
 
-  local filename = sessions_dir .. "/" .. self.name .. ".json"
+  local filename = util.session_data_dir() .. "/" .. self.name .. ".json"
   local file = io.open(filename, "w") -- overwrites
   if not file then
     vim.notify("Unable to open file at path: " .. filename, vim.log.levels.ERROR)
@@ -185,7 +185,7 @@ end
 --- Load the snapshot from disk by name. Returns nil if there is no such file
 ---@return Snapshot|nil
 function M.read(session_name)
-  local filename = sessions_dir .. "/" .. session_name .. ".json"
+  local filename = util.session_data_dir() .. "/" .. session_name .. ".json"
   local file = io.open(filename, "r")
   if not file then
     vim.notify("File not found at path: " .. filename, vim.log.levels.ERROR)
@@ -203,6 +203,8 @@ function M.read(session_name)
   snapshot.windows = content.windows
   snapshot.tabs = content.tabs
   snapshot:rebuild_tab_list()
+  snapshot.current_tab_id = content.current_tab_id
+  snapshot.current_win_id = content.current_win_id
   return snapshot
 end
 

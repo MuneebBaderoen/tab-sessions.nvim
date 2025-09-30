@@ -1,5 +1,13 @@
 local M = {}
 
+M.anonymous_session_name = "anonymous"
+
+function M.session_data_dir()
+  local data_dir = vim.fn.stdpath("data") -- usually "~/.local/share/nvim" on Linux/macOS
+  local sessions_dir = data_dir .. "/tab-sessions"
+  return sessions_dir
+end
+
 function M.uuidgen()
   return string.lower(vim.fn.system("uuidgen"):gsub("%s+", ""))
 end

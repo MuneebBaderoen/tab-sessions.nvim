@@ -5,23 +5,24 @@ local snapshot_factory = require("tab-sessions-snapshot")
 local TabLayoutContainer = snapshot_factory.TabLayoutContainer
 local TabLayoutWindow = snapshot_factory.TabLayoutWindow
 
-local anonymous_session_name = "anonymous"
-
 ---@class TabInfo
 ---@field session_name string
 ---@field session_active boolean
 ---@field tab_position integer
+---@field tab_active boolean
 local TabInfo = {}
 
 ---@param session_name string
 ---@param session_active boolean
 ---@param tab_position integer
+---@param tab_active boolean
 ---@return TabInfo
-function TabInfo:new(session_name, session_active, tab_position)
+function TabInfo:new(session_name, session_active, tab_position, tab_active)
   local obj = setmetatable({}, self)
   obj.session_name = session_name
   obj.session_active = session_active
   obj.tab_position = tab_position
+  obj.tab_active = tab_active
   return obj
 end
 
@@ -45,7 +46,7 @@ function SessionManager:new()
   obj.tab_id_map = id_map.create("tab")
   obj.win_id_map = id_map.create("win")
   obj.buf_id_map = id_map.create("buf")
-  obj.current_session_name = anonymous_session_name
+  obj.current_session_name = util.anonymous_session_name
 
   return obj
 end
@@ -84,14 +85,20 @@ function SessionManager:create(session_name, persistent)
 end
 
 --- Get tab info to render tabline
----@param tab_nr integer
----@return TabInfo
-function SessionManager:get_tab_info(tab_nr)
-  local tab_id = self.tab_id_map:get_id(tab_nr)
-  local session_name = self.tab_session_map[tab_id]
-  local session_active = self.current_session_name == session_name
-  local tab_position = self.session_map[session_name].tabs[tab_id].position
-  return TabInfo:new(session_name, session_active, tab_position)
+---@return table<TabInfo>
+function SessionManager:get_tab_info()
+  local current_tab = vim.api.nvim_get_current_tabpage()
+
+  local result = {}
+  for _, tab_nr in ipairs(vim.api.nvim_list_tabpages()) do
+    local tab_id = self.tab_id_map:get_id(tab_nr)
+    local session_name = self.tab_session_map[tab_id]
+    local session_active = self.current_session_name == session_name
+    local tab_position = self.session_map[session_name].tabs[tab_id].position
+    local tab_active = tab_nr == current_tab
+    table.insert(result, TabInfo:new(session_name, session_active, tab_position, tab_active))
+  end
+  return result
 end
 
 --- Write all snapshots to disk. Usually only required on exit
@@ -164,6 +171,13 @@ function SessionManager:refresh_session(session_snapshot)
       session_snapshot:new_tab(tab_id, tab_idx, layout)
     end
   end
+
+  -- Update current view if this is the active session. This is useful
+  -- when toggling between sessions
+  if session_snapshot.name == self.current_session_name then
+    session_snapshot.current_tab_id = self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
+    session_snapshot.current_win_id = self.win_id_map:get_id(vim.api.nvim_get_current_win())
+  end
 end
 
 --- Restore buffers defined in the session into the running Neovim instance
@@ -188,10 +202,12 @@ end
 
 --- Restore the tab layout defined in the session into the running Neovim instance
 ---@param session_snapshot Snapshot
----@param node TabLayoutNode
+---@parwam node TabLayoutNode
 function SessionManager:restore_tab_layout(session_snapshot, node)
   if node.kind == "leaf" then
     local window = session_snapshot.windows[node.win_id]
+    self.win_id_map:set_mapping(vim.api.nvim_get_current_win(), window.win_id)
+    local win_nr = self.win_id_map:get_nr(window.win_id)
     local buf_nr = self.buf_id_map:get_nr(window.buf_id)
     if not buf_nr then
       vim.notify("Buffer not found for buf_id: " .. window.buf_id, vim.log.levels.WARN)
@@ -200,8 +216,13 @@ function SessionManager:restore_tab_layout(session_snapshot, node)
 
     -- Assign the buffer to the window, and safe attempt to set the cursor position.
     -- The file may have changed since the cursor position was persisted.
-    vim.api.nvim_win_set_buf(0, buf_nr)
-    pcall(vim.api.nvim_win_set_cursor, 0, window.cursor)
+    vim.api.nvim_win_set_buf(win_nr, buf_nr)
+    -- Delay setting cursor position until window/buffer settles. Without this,
+    -- we are off by one. This may be necessary as result of having sign column
+    -- enabled, but that remains to be proven.
+    vim.schedule(function()
+      pcall(vim.api.nvim_win_set_cursor, win_nr, window.cursor)
+    end)
     return
   else
     for i, child in ipairs(node.children or {}) do
@@ -216,7 +237,25 @@ function SessionManager:restore_tab_layout(session_snapshot, node)
 end
 
 ---@param session_name string
-function SessionManager:restore(session_name)
+function SessionManager:activate_session(session_name)
+  local session = self.session_map[session_name]
+  if session then
+    -- Capture state of current session before switching
+    self:refresh_session(self:current_session())
+
+    -- Switch to the target session
+    self.current_session_name = session.name
+
+    -- Activate the current tab
+    local tab_nr = self.tab_id_map:get_nr(session.current_tab_id)
+    vim.api.nvim_set_current_tabpage(tab_nr)
+  else
+    self:restore_session(session_name)
+  end
+end
+
+---@param session_name string
+function SessionManager:restore_session(session_name)
   local snapshot = snapshot_factory.read(session_name)
   if not snapshot then
     vim.notify("Session snapshot could not be loaded for session: " .. session_name, vim.log.levels.ERROR)
@@ -252,6 +291,11 @@ function SessionManager:restore(session_name)
     end
   end
 
+  local tab_nr = self.tab_id_map:get_nr(snapshot.current_tab_id)
+  local win_nr = self.win_id_map:get_nr(snapshot.current_win_id)
+  vim.api.nvim_set_current_tabpage(tab_nr)
+  vim.api.nvim_set_current_win(win_nr)
+
   -- Prune buffers keeping only the buffers attached to real files
   -- Perform the prune after restoring, to ensure that the window layout
   -- is preserved as expected
@@ -285,6 +329,7 @@ end
 
 function SessionManager:tab_create()
   vim.cmd("tabnew")
+  vim.cmd("tcd " .. self:current_session().workdir)
   local tab_id = self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
   self.tab_session_map[tab_id] = self.current_session_name
   self:refresh_session(self:current_session())
