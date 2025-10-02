@@ -81,6 +81,7 @@ function SessionManager:create(session_name, persistent)
 
   local session = self.session_map[session_name]
   self:refresh_session(session)
+  session:write()
   return session
 end
 
@@ -91,12 +92,20 @@ function SessionManager:get_tab_info()
 
   local result = {}
   for _, tab_nr in ipairs(vim.api.nvim_list_tabpages()) do
+    local tab_active = tab_nr == current_tab
     local tab_id = self.tab_id_map:get_id(tab_nr)
     local session_name = self.tab_session_map[tab_id]
-    local session_active = self.current_session_name == session_name
-    local tab_position = self.session_map[session_name].tabs[tab_id].position
-    local tab_active = tab_nr == current_tab
-    table.insert(result, TabInfo:new(session_name, session_active, tab_position, tab_active))
+
+    if session_name then
+      local session_active = self.current_session_name == session_name
+      local tab_position = self.session_map[session_name].tabs[tab_id].position
+      table.insert(result, TabInfo:new(session_name, session_active, tab_position, tab_active))
+    else
+      -- A tab has appeared. Assign it to the currently active session
+      -- self.tab_session_map[self.current_session_name] = tab_id
+      -- self:restore_session(self.current_session_name)
+      table.insert(result, TabInfo:new("Unknown", false, 0, tab_active))
+    end
   end
   return result
 end
@@ -106,6 +115,18 @@ function SessionManager:write_all()
   for _, session_snapshot in pairs(self.session_map) do
     self:refresh_session(session_snapshot)
     session_snapshot:write()
+  end
+end
+
+--- Create a new tab, and return the tab id
+---@return string
+function SessionManager:do_tabnew(tab_id)
+  vim.cmd("tabnew")
+  vim.cmd("tcd " .. self:current_session().workdir)
+  if tab_id then
+    return self.tab_id_map:set_mapping(vim.api.nvim_get_current_tabpage(), tab_id)
+  else
+    return self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
   end
 end
 
@@ -274,8 +295,7 @@ function SessionManager:restore_session(session_name)
   local tabs = snapshot.tab_list
   if #tabs == 0 then
     -- If the stored session does not cont
-    vim.cmd("tabnew")
-    local tab_id = self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
+    local tab_id = self:do_tabnew()
     self.tab_session_map[tab_id] = snapshot.name
     -- HACK: We don't have a convenient way to re-apply the current layout into
     -- the snapshot, other than to perform a capture of the manual
@@ -284,8 +304,7 @@ function SessionManager:restore_session(session_name)
   else
     for _, tab in ipairs(tabs) do
       -- Create new tab, and assign it to the session being restored
-      vim.cmd("tabnew")
-      self.tab_id_map:set_mapping(vim.api.nvim_get_current_tabpage(), tab.tab_id)
+      self:do_tabnew(tab.tab_id)
       self.tab_session_map[tab.tab_id] = snapshot.name
       self:restore_tab_layout(snapshot, tab.layout)
     end
@@ -328,9 +347,7 @@ function SessionManager:window_close()
 end
 
 function SessionManager:tab_create()
-  vim.cmd("tabnew")
-  vim.cmd("tcd " .. self:current_session().workdir)
-  local tab_id = self.tab_id_map:get_id(vim.api.nvim_get_current_tabpage())
+  local tab_id = self:do_tabnew()
   self.tab_session_map[tab_id] = self.current_session_name
   self:refresh_session(self:current_session())
 end
@@ -351,9 +368,13 @@ function SessionManager:on_tab_close()
     if not is_tab_valid(tab_handles, tab_nr) then
       local tab_id = self.tab_id_map:get_id(tab_nr)
       local session_name = self.tab_session_map[tab_id]
-      self.session_map[session_name]:remove_tab(tab_id)
-      self.tab_id_map:remove_mapping(tab_id)
-      self.tab_session_map[tab_id] = nil
+      -- Tabs created by plugins like diffview or others created outside our
+      -- control may not have been assigned to a session.
+      if session_name then
+        self.session_map[session_name]:remove_tab(tab_id)
+        self.tab_id_map:remove_mapping(tab_id)
+        self.tab_session_map[tab_id] = nil
+      end
     end
   end
 end
